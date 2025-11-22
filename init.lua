@@ -4,12 +4,30 @@ local world_path = minetest.get_worldpath()
 local world_name = world_path:match( "([^/]+)$" )
 local waypoints = minetest.deserialize(modstorage:get_string(world_name)) or {}
 
--- New: configurable HUD toggle (default: true)
-local show_waypoint_hud = minetest.settings:get_bool("simple_waypoints.show_hud", true)
+-- Read persisted toggles from modstorage first, then fall back to settings
+local function read_bool_from_storage(key, settings_key, default)
+	local v = modstorage:get_string(key)
+	if v ~= "" then
+		return v == "true"
+	end
+	-- try settings (support both names used historically)
+	if settings_key then
+		local s = minetest.settings:get_bool(settings_key, nil)
+		if s ~= nil then return s end
+	end
+	return default
+end
+
+local show_waypoint_hud = read_bool_from_storage("show_waypoint_hud", "simple_waypoints.show_hud", true)
+local beacons_enabled = read_bool_from_storage("beacons_enabled", "simple_waypoints.beacons_enable", minetest.settings:get_bool("beacons.enable", false))
 
 --------------- HELPER FUNCTIONS ---------------
 local function save() -- dumps table to modstorage
 	modstorage:set_string(world_name, minetest.serialize(waypoints))
+end
+
+local function set_persisted_toggle(key, value)
+	modstorage:set_string(key, tostring(value and true or false))
 end
 
 local function getIndexByName(tbl, n)
@@ -95,17 +113,31 @@ local function loadWaypointsHud(tbl, player)
 
 	for i, v in ipairs(tbl) do
 		if v and v.pos then
-			local pos = minetest.string_to_pos(v.pos)
-			if pos then
-				local hid = player:hud_add({
-					hud_elem_type = "waypoint",
-					name = v.name,
-					text = "m",
-					number = 0xFFFFFF,
-					world_pos = pos,
-				})
-				v.hudId = hid
+			-- don't add again if already present
+			if not v.hudId then
+				local pos = minetest.string_to_pos(v.pos)
+				if pos then
+					local hid = player:hud_add({
+						hud_elem_type = "waypoint",
+						name = v.name,
+						text = "m",
+						number = 0xFFFFFF,
+						world_pos = pos,
+					})
+					v.hudId = hid
+				end
 			end
+		end
+	end
+end
+
+-- Remove HUD markers for a given player (used when disabling HUDs)
+local function removeAllWaypointsHudForPlayer(player)
+	if not player then return end
+	for _, v in ipairs(waypoints) do
+		if v and v.hudId then
+			pcall(function() player:hud_remove(v.hudId) end)
+			v.hudId = nil
 		end
 	end
 end
@@ -159,17 +191,13 @@ local function removeBeacon(pos)
 			local target_node = minetest.get_node({x=pos.x, y=pos.y+i, z=pos.z})
 			if target_node.name == "simple_waypoints:"..v.."_beacon" then
 				minetest.add_node({x=pos.x, y=pos.y+i, z=pos.z}, {name="air"})
-				-- if you want to remove only one beacon per color/column, you could break here,
-				-- but keep scanning to ensure all variants removed.
+				-- continue scanning to ensure all variants removed in column
 			end
 		end
 	end
 end
 
 --------------- CHAT COMMANDS -------------------
-
--- Load beacon setting from settings.conf
-local beacons_enabled = minetest.settings:get_bool("beacons.enable", false)
 
 -- CREATE WAYPOINT
 minetest.register_chatcommand("wc", {
@@ -289,6 +317,101 @@ minetest.register_chatcommand("wf", {
 		-- Show the waypoints formspec to the player
 		minetest.show_formspec(name, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
 	end,
+})
+
+-- NEW: Toggle HUD display at runtime
+minetest.register_chatcommand("sw_hud", {
+	params = "<on|off|toggle|status>",
+	description = "Toggle waypoint HUD display (runtime). Use 'status' to view current value.",
+	privs = {teleport = true},
+	func = function(name, params)
+		local cmd = params:lower():gsub("^%s*(.-)%s*$","%1")
+		if cmd == "" or cmd == "status" then
+			return true, "Waypoint HUDs currently: " .. (show_waypoint_hud and "ON" or "OFF")
+		end
+		if cmd == "on" or cmd == "true" then
+			if show_waypoint_hud then
+				return true, "Waypoint HUDs are already ON"
+			end
+			show_waypoint_hud = true
+			set_persisted_toggle("show_waypoint_hud", true)
+			-- add HUDs for all connected players
+			for _, player in ipairs(minetest.get_connected_players()) do
+				loadWaypointsHud(waypoints, player)
+			end
+			return true, "Waypoint HUDs enabled"
+		elseif cmd == "off" or cmd == "false" then
+			if not show_waypoint_hud then
+				return true, "Waypoint HUDs are already OFF"
+			end
+			show_waypoint_hud = false
+			set_persisted_toggle("show_waypoint_hud", false)
+			-- remove HUDs for all connected players
+			for _, player in ipairs(minetest.get_connected_players()) do
+				removeAllWaypointsHudForPlayer(player)
+			end
+			return true, "Waypoint HUDs disabled"
+		elseif cmd == "toggle" then
+			-- toggle and reuse the on/off behavior
+			if show_waypoint_hud then
+				return minetest.registered_chatcommands["sw_hud"].func(name, "off")
+			else
+				return minetest.registered_chatcommands["sw_hud"].func(name, "on")
+			end
+		else
+			return false, "Invalid parameter. Use on/off/toggle/status"
+		end
+	end
+})
+
+-- NEW: Toggle beacons at runtime
+minetest.register_chatcommand("sw_beacons", {
+	params = "<on|off|toggle|status>",
+	description = "Toggle waypoint beacons (world nodes). Use 'status' to view current value.",
+	privs = {teleport = true},
+	func = function(name, params)
+		local cmd = params:lower():gsub("^%s*(.-)%s*$","%1")
+		if cmd == "" or cmd == "status" then
+			return true, "Waypoints beacons currently: " .. (beacons_enabled and "ON" or "OFF")
+		end
+		if cmd == "on" or cmd == "true" then
+			if beacons_enabled then
+				return true, "Waypoints beacons are already ON"
+			end
+			beacons_enabled = true
+			set_persisted_toggle("beacons_enabled", true)
+			-- place beacons at all waypoints
+			for _, v in ipairs(waypoints) do
+				if v and v.pos then
+					local p = minetest.string_to_pos(v.pos)
+					if p then placeBeacon(p) end
+				end
+			end
+			return true, "Waypoints beacons enabled (beacons placed)"
+		elseif cmd == "off" or cmd == "false" then
+			if not beacons_enabled then
+				return true, "Waypoints beacons are already OFF"
+			end
+			beacons_enabled = false
+			set_persisted_toggle("beacons_enabled", false)
+			-- remove beacons at all waypoints
+			for _, v in ipairs(waypoints) do
+				if v and v.pos then
+					local p = minetest.string_to_pos(v.pos)
+					if p then removeBeacon(p) end
+				end
+			end
+			return true, "Waypoints beacons disabled (beacons removed)"
+		elseif cmd == "toggle" then
+			if beacons_enabled then
+				return minetest.registered_chatcommands["sw_beacons"].func(name, "off")
+			else
+				return minetest.registered_chatcommands["sw_beacons"].func(name, "on")
+			end
+		else
+			return false, "Invalid parameter. Use on/off/toggle/status"
+		end
+	end
 })
 
 --------------- FORMSPEC -----------------------
