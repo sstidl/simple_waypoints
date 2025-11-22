@@ -4,13 +4,16 @@ local world_path = minetest.get_worldpath()
 local world_name = world_path:match( "([^/]+)$" )
 local waypoints = minetest.deserialize(modstorage:get_string(world_name)) or {}
 
+-- New: configurable HUD toggle (default: true)
+local show_waypoint_hud = minetest.settings:get_bool("simple_waypoints.show_hud", true)
+
 --------------- HELPER FUNCTIONS ---------------
 local function save() -- dumps table to modstorage
 	modstorage:set_string(world_name, minetest.serialize(waypoints))
 end
 
-local function getIndexByName(table, n)
-	for k,v in pairs(table) do
+local function getIndexByName(tbl, n)
+	for k,v in pairs(tbl) do
 		if v.name == n then
 			return k
 		end
@@ -18,8 +21,8 @@ local function getIndexByName(table, n)
 	return nil --Index not found
 end
 
-local function getPosByName(table, n)
-	for k,v in pairs(table) do
+local function getPosByName(tbl, n)
+	for k,v in pairs(tbl) do
 		if v.name == n then
 			return v.pos
 		end
@@ -27,48 +30,83 @@ local function getPosByName(table, n)
 	return nil -- Position not found
 end
 
-local function waypointExists(table, n)
-	for k,v in pairs(table) do
+local function waypointExists(tbl, n)
+	for k,v in pairs(tbl) do
 	  if v.name == n then
 		return "Waypoint exists." 
 	  end
 	end
 	return nil --Waypoint doesn't exist
-  end
+end
 
-local function addWaypointHud(table, player)
-	local wayName = waypoints[#waypoints].name
-	local wayPos = minetest.string_to_pos(waypoints[#waypoints].pos)
-	table[#table].hudId = player:hud_add({
+-- HUD helper: add HUD marker for the last entry in tbl (called after adding)
+local function addWaypointHud(tbl, player)
+	if not show_waypoint_hud then return end
+	if not player or type(tbl) ~= "table" then return end
+
+	local idx = #tbl
+	if idx < 1 then return end
+	local entry = tbl[idx]
+	if not entry or not entry.pos then return end
+
+	local wayPos = minetest.string_to_pos(entry.pos)
+	if not wayPos then return end
+
+	-- add hud and store hudId on the waypoint entry
+	local hud_id = player:hud_add({
 		hud_elem_type = "waypoint",
-		name = wayName,
+		name = entry.name,
+		text = "m",
+		number = 0xFFFFFF,
+		world_pos = wayPos,
+	})
+	entry.hudId = hud_id
+end
+
+-- HUD helper: refresh HUD for a given index in tbl
+local function refreshWaypointHud(tbl, player, idx)
+	if not show_waypoint_hud then return end
+	if not player or type(tbl) ~= "table" or type(idx) ~= "number" then return end
+	local entry = tbl[idx]
+	if not entry or not entry.pos then return end
+
+	-- remove existing hud if present
+	if entry.hudId then
+		pcall(function() player:hud_remove(entry.hudId) end)
+		entry.hudId = nil
+	end
+
+	local wayPos = minetest.string_to_pos(entry.pos)
+	if not wayPos then return end
+
+	entry.hudId = player:hud_add({
+		hud_elem_type = "waypoint",
+		name = entry.name,
 		text = "m",
 		number = 0xFFFFFF,
 		world_pos = wayPos,
 	})
 end
 
-local function refreshWaypointHud(table, player)
-	local wayName = waypoints[selected_idx].name
-	local wayPos = minetest.string_to_pos(waypoints[selected_idx].pos)
-	table[#table].hudId = player:hud_add({
-		hud_elem_type = "waypoint",
-		name = wayName,
-		text = "m",
-		number = 0xFFFFFF,
-		world_pos = wayPos,
-	})
-end
+-- HUD helper: load all waypoints into player's HUD
+local function loadWaypointsHud(tbl, player)
+	if not show_waypoint_hud then return end
+	if not player or type(tbl) ~= "table" then return end
 
-local function loadWaypointsHud(table, player)
-	for k,v in pairs(waypoints) do
-		player:hud_add({
-		hud_elem_type = "waypoint",
-		name = v.name,
-		text = "m",
-		number = 0xFFFFFF,
-		world_pos = minetest.string_to_pos(v.pos),
-	})
+	for i, v in ipairs(tbl) do
+		if v and v.pos then
+			local pos = minetest.string_to_pos(v.pos)
+			if pos then
+				local hid = player:hud_add({
+					hud_elem_type = "waypoint",
+					name = v.name,
+					text = "m",
+					number = 0xFFFFFF,
+					world_pos = pos,
+				})
+				v.hudId = hid
+			end
+		end
 	end
 end
 
@@ -109,6 +147,8 @@ local function placeBeacon(pos, color)
 				minetest.add_node({x=pos.x, y=pos.y+i, z=pos.z},
 				{name="simple_waypoints:"..color.."_beacon"})
 			end
+			-- stop after placing one beacon
+			break
 		end
 	end
 end
@@ -119,6 +159,8 @@ local function removeBeacon(pos)
 			local target_node = minetest.get_node({x=pos.x, y=pos.y+i, z=pos.z})
 			if target_node.name == "simple_waypoints:"..v.."_beacon" then
 				minetest.add_node({x=pos.x, y=pos.y+i, z=pos.z}, {name="air"})
+				-- if you want to remove only one beacon per color/column, you could break here,
+				-- but keep scanning to ensure all variants removed.
 			end
 		end
 	end
@@ -150,7 +192,7 @@ minetest.register_chatcommand("wc", {
 			waypoints[#waypoints+1] = { name = params,
 			pos = minetest.pos_to_string(round_pos) }
 
-			-- Add the waypoint to the player's HUD
+			-- Add the waypoint to the player's HUD (if enabled)
 			addWaypointHud(waypoints, player)
 
 			-- Check if beacons are enabled before placing a beacon
@@ -180,23 +222,22 @@ minetest.register_chatcommand("wd", {
 		local targetIndex = getIndexByName(waypoints, params)
 		local beaconPos = getPosByName(waypoints, params)
 		if (type(targetIndex) == "number") then
-			removeBeacon(minetest.string_to_pos(beaconPos))
-			player:hud_remove(waypoints[targetIndex].hudId)
+			if beaconPos then
+				local bp = minetest.string_to_pos(beaconPos)
+				if bp then removeBeacon(bp) end
+			end
+
+			-- Remove HUD safely if present
+			if show_waypoint_hud and waypoints[targetIndex] and waypoints[targetIndex].hudId then
+				pcall(function() player:hud_remove(waypoints[targetIndex].hudId) end)
+			end
 
 			-- Remove the waypoint from the table
 			table.remove(waypoints, targetIndex)
 
-			-- Now get the correct index for the hud update
-			targetIndex = getIndexByName(waypoints, params)
-
-			-- Update the HUD
-			if targetIndex ~= nil then
-				player:hud_remove(waypoints[targetIndex].hudId)
-			end
-
 			save()
 			return true, "Waypoint deleted."
-		elseif type(targetIndex) ~= "number" then
+		else
 			return false, "Waypoint "..params.." is invalid or inexistent."
 		end
 	end
@@ -234,8 +275,8 @@ minetest.register_chatcommand("wt", {
 			-- Teleport the player to the waypoint position
 			player:set_pos(minetest.string_to_pos(targetPos))
 			return true, tostring("Teleported "..p_name.." to "..params..".")
-		elseif type(targetPos) ~= "string" then
-			return true, tostring("Waypoint "..params.." is invalid or inexistent.")
+		else
+			return false, tostring("Waypoint "..params.." is invalid or inexistent.")
 		end
 	end
 })
@@ -353,8 +394,14 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 	elseif fields.delete then
 		if waypoints[selected_idx] ~= nil then
 			local beaconPos = getPosByName(waypoints, waypoints[selected_idx].name)
-			removeBeacon(minetest.string_to_pos(beaconPos))
-			player:hud_remove(waypoints[selected_idx].hudId)
+			if beaconPos then
+				local bp = minetest.string_to_pos(beaconPos)
+				if bp then removeBeacon(bp) end
+			end
+			if show_waypoint_hud and waypoints[selected_idx] and waypoints[selected_idx].hudId then
+				pcall(function() player:hud_remove(waypoints[selected_idx].hudId) end)
+				waypoints[selected_idx].hudId = nil
+			end
 			table.remove(waypoints, selected_idx)
 			save()
 			minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
@@ -364,11 +411,17 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 			minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_rename())
 		end
 	elseif fields.ok or fields.key_enter_field then
-		if fields.new_name ~= nil and string.len(fields.new_name) ~= 0 then
-		waypoints[selected_idx].name = fields.new_name
-		player:hud_remove(waypoints[selected_idx].hudId)
-		refreshWaypointHud(waypoints, player)
-		minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
+		if fields.new_name ~= nil and string.len(fields.new_name) ~= 0 and selected_idx then
+			waypoints[selected_idx].name = fields.new_name
+			-- update HUD for renamed waypoint
+			if show_waypoint_hud then
+				if waypoints[selected_idx].hudId then
+					pcall(function() player:hud_remove(waypoints[selected_idx].hudId) end)
+					waypoints[selected_idx].hudId = nil
+				end
+				refreshWaypointHud(waypoints, player, selected_idx)
+			end
+			minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
 		end
 	end
 end)
