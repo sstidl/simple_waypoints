@@ -38,6 +38,24 @@ local function set_persisted_toggle(key, value)
 	modstorage:set_string(key, tostring(value and true or false))
 end
 
+-- Reindex player HUD IDs after a waypoint deletion
+local function reindexPlayerHuds(deleted_index)
+	for _, p in ipairs(minetest.get_connected_players()) do
+		local pname = p:get_player_name()
+		if player_huds[pname] then
+			local new_huds = {}
+			for idx, hud_id in pairs(player_huds[pname]) do
+				if idx > deleted_index then
+					new_huds[idx - 1] = hud_id
+				elseif idx < deleted_index then
+					new_huds[idx] = hud_id
+				end
+			end
+			player_huds[pname] = new_huds
+		end
+	end
+end
+
 local function getIndexByName(tbl, n)
 	for k,v in pairs(tbl) do
 		if v.name == n then
@@ -306,20 +324,7 @@ minetest.register_chatcommand("wd", {
 
 			-- Reindex HUD entries for all players (indices shift down after removal)
 			if show_waypoint_hud then
-				for _, p in ipairs(minetest.get_connected_players()) do
-					local pname = p:get_player_name()
-					if player_huds[pname] then
-						local new_huds = {}
-						for idx, hud_id in pairs(player_huds[pname]) do
-							if idx > targetIndex then
-								new_huds[idx - 1] = hud_id
-							elseif idx < targetIndex then
-								new_huds[idx] = hud_id
-							end
-						end
-						player_huds[pname] = new_huds
-					end
-				end
+				reindexPlayerHuds(targetIndex)
 			end
 
 			save()
@@ -603,20 +608,7 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 			
 			-- Reindex HUD entries for all players
 			if show_waypoint_hud then
-				for _, p in ipairs(minetest.get_connected_players()) do
-					local pn = p:get_player_name()
-					if player_huds[pn] then
-						local new_huds = {}
-						for idx, hud_id in pairs(player_huds[pn]) do
-							if idx > selected_idx then
-								new_huds[idx - 1] = hud_id
-							elseif idx < selected_idx then
-								new_huds[idx] = hud_id
-							end
-						end
-						player_huds[pn] = new_huds
-					end
-				end
+				reindexPlayerHuds(selected_idx)
 			end
 			
 			save()
