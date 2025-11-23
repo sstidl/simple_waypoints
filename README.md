@@ -40,7 +40,7 @@ NOTE 1:
 
 The GUI allows you to select a beacon color from 8 available options. When creating waypoints using the chat commands, a random color will be selected for the beacon.
 
-**UPDATE:** Beacons are disabled by default but you can enable them using `/sw_beacons on` or in the minetest config.
+**UPDATE:** Beacons are disabled by default but you can enable them using `/sw_beacons on` or in the Minetest config.
 
 NOTE 2: "teleport" privilege is required.
 
