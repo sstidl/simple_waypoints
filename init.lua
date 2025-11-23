@@ -21,9 +21,17 @@ end
 local show_waypoint_hud = read_bool_from_storage("show_waypoint_hud", "simple_waypoints.show_hud", true)
 local beacons_enabled = read_bool_from_storage("beacons_enabled", "simple_waypoints.beacons_enable", minetest.settings:get_bool("beacons.enable", false))
 
+-- Track HUD IDs per player: player_huds[player_name][waypoint_index] = hud_id
+local player_huds = {}
+
 --------------- HELPER FUNCTIONS ---------------
 local function save() -- dumps table to modstorage
-	modstorage:set_string(world_name, minetest.serialize(waypoints))
+	-- Clean up any hudId fields that shouldn't be persisted
+	local clean_waypoints = {}
+	for i, wp in ipairs(waypoints) do
+		clean_waypoints[i] = {name = wp.name, pos = wp.pos}
+	end
+	modstorage:set_string(world_name, minetest.serialize(clean_waypoints))
 end
 
 local function set_persisted_toggle(key, value)
@@ -70,7 +78,12 @@ local function addWaypointHud(tbl, player)
 	local wayPos = minetest.string_to_pos(entry.pos)
 	if not wayPos then return end
 
-	-- add hud and store hudId on the waypoint entry
+	local pname = player:get_player_name()
+	if not player_huds[pname] then
+		player_huds[pname] = {}
+	end
+
+	-- add hud and store hudId in player-specific table
 	local hud_id = player:hud_add({
 		hud_elem_type = "waypoint",
 		name = entry.name,
@@ -78,7 +91,7 @@ local function addWaypointHud(tbl, player)
 		number = 0xFFFFFF,
 		world_pos = wayPos,
 	})
-	entry.hudId = hud_id
+	player_huds[pname][idx] = hud_id
 end
 
 -- HUD helper: refresh HUD for a given index in tbl
@@ -88,22 +101,28 @@ local function refreshWaypointHud(tbl, player, idx)
 	local entry = tbl[idx]
 	if not entry or not entry.pos then return end
 
+	local pname = player:get_player_name()
+	if not player_huds[pname] then
+		player_huds[pname] = {}
+	end
+
 	-- remove existing hud if present
-	if entry.hudId then
-		pcall(function() player:hud_remove(entry.hudId) end)
-		entry.hudId = nil
+	if player_huds[pname][idx] then
+		pcall(function() player:hud_remove(player_huds[pname][idx]) end)
+		player_huds[pname][idx] = nil
 	end
 
 	local wayPos = minetest.string_to_pos(entry.pos)
 	if not wayPos then return end
 
-	entry.hudId = player:hud_add({
+	local hud_id = player:hud_add({
 		hud_elem_type = "waypoint",
 		name = entry.name,
 		text = "m",
 		number = 0xFFFFFF,
 		world_pos = wayPos,
 	})
+	player_huds[pname][idx] = hud_id
 end
 
 -- HUD helper: load all waypoints into player's HUD
@@ -111,10 +130,15 @@ local function loadWaypointsHud(tbl, player)
 	if not show_waypoint_hud then return end
 	if not player or type(tbl) ~= "table" then return end
 
+	local pname = player:get_player_name()
+	if not player_huds[pname] then
+		player_huds[pname] = {}
+	end
+
 	for i, v in ipairs(tbl) do
 		if v and v.pos then
-			-- don't add again if already present
-			if not v.hudId then
+			-- don't add again if already present for this player
+			if not player_huds[pname][i] then
 				local pos = minetest.string_to_pos(v.pos)
 				if pos then
 					local hid = player:hud_add({
@@ -124,7 +148,7 @@ local function loadWaypointsHud(tbl, player)
 						number = 0xFFFFFF,
 						world_pos = pos,
 					})
-					v.hudId = hid
+					player_huds[pname][i] = hid
 				end
 			end
 		end
@@ -134,19 +158,26 @@ end
 -- Remove HUD markers for a given player (used when disabling HUDs)
 local function removeAllWaypointsHudForPlayer(player)
 	if not player then return end
-	for _, v in ipairs(waypoints) do
-		if v and v.hudId then
-			pcall(function() player:hud_remove(v.hudId) end)
-			v.hudId = nil
+	local pname = player:get_player_name()
+	if player_huds[pname] then
+		for idx, hud_id in pairs(player_huds[pname]) do
+			pcall(function() player:hud_remove(hud_id) end)
 		end
+		player_huds[pname] = {}
 	end
 end
 
---------------- ON JOIN ------------------
-local join = minetest.register_on_joinplayer(function(player)
+--------------- ON JOIN / LEAVE ------------------
+minetest.register_on_joinplayer(function(player)
 	minetest.after(.5, function()
 		loadWaypointsHud(waypoints, player)
 	end)
+end)
+
+minetest.register_on_leaveplayer(function(player)
+	local pname = player:get_player_name()
+	-- Clean up player HUD tracking when they leave
+	player_huds[pname] = nil
 end)
 
 -------------- NODE DEFINITIONS -----------------
@@ -220,8 +251,12 @@ minetest.register_chatcommand("wc", {
 			waypoints[#waypoints+1] = { name = params,
 			pos = minetest.pos_to_string(round_pos) }
 
-			-- Add the waypoint to the player's HUD (if enabled)
-			addWaypointHud(waypoints, player)
+			-- Add the waypoint to all players' HUDs (if enabled)
+			if show_waypoint_hud then
+				for _, p in ipairs(minetest.get_connected_players()) do
+					addWaypointHud(waypoints, p)
+				end
+			end
 
 			-- Check if beacons are enabled before placing a beacon
 			if beacons_enabled then
@@ -255,13 +290,37 @@ minetest.register_chatcommand("wd", {
 				if bp then removeBeacon(bp) end
 			end
 
-			-- Remove HUD safely if present
-			if show_waypoint_hud and waypoints[targetIndex] and waypoints[targetIndex].hudId then
-				pcall(function() player:hud_remove(waypoints[targetIndex].hudId) end)
+			-- Remove HUD for all players
+			if show_waypoint_hud then
+				for _, p in ipairs(minetest.get_connected_players()) do
+					local pname = p:get_player_name()
+					if player_huds[pname] and player_huds[pname][targetIndex] then
+						pcall(function() p:hud_remove(player_huds[pname][targetIndex]) end)
+						player_huds[pname][targetIndex] = nil
+					end
+				end
 			end
 
 			-- Remove the waypoint from the table
 			table.remove(waypoints, targetIndex)
+
+			-- Reindex HUD entries for all players (indices shift down after removal)
+			if show_waypoint_hud then
+				for _, p in ipairs(minetest.get_connected_players()) do
+					local pname = p:get_player_name()
+					if player_huds[pname] then
+						local new_huds = {}
+						for idx, hud_id in pairs(player_huds[pname]) do
+							if idx > targetIndex then
+								new_huds[idx - 1] = hud_id
+							elseif idx < targetIndex then
+								new_huds[idx] = hud_id
+							end
+						end
+						player_huds[pname] = new_huds
+					end
+				end
+			end
 
 			save()
 			return true, "Waypoint deleted."
@@ -503,7 +562,14 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 			local round_pos = vector.round(p_pos)
 			if not waypointExists(waypoints, fields.name) then
 				waypoints[#waypoints+1] = { name = fields.name, pos = minetest.pos_to_string(round_pos) }
-				addWaypointHud(waypoints, player)
+				
+				-- Add HUD for all connected players
+				if show_waypoint_hud then
+					for _, p in ipairs(minetest.get_connected_players()) do
+						addWaypointHud(waypoints, p)
+					end
+				end
+				
 				if beacons_enabled then
 					placeBeacon(round_pos, fields.color)
 				end
@@ -521,11 +587,38 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 				local bp = minetest.string_to_pos(beaconPos)
 				if bp then removeBeacon(bp) end
 			end
-			if show_waypoint_hud and waypoints[selected_idx] and waypoints[selected_idx].hudId then
-				pcall(function() player:hud_remove(waypoints[selected_idx].hudId) end)
-				waypoints[selected_idx].hudId = nil
+			
+			-- Remove HUD for all players
+			if show_waypoint_hud then
+				for _, p in ipairs(minetest.get_connected_players()) do
+					local pn = p:get_player_name()
+					if player_huds[pn] and player_huds[pn][selected_idx] then
+						pcall(function() p:hud_remove(player_huds[pn][selected_idx]) end)
+						player_huds[pn][selected_idx] = nil
+					end
+				end
 			end
+			
 			table.remove(waypoints, selected_idx)
+			
+			-- Reindex HUD entries for all players
+			if show_waypoint_hud then
+				for _, p in ipairs(minetest.get_connected_players()) do
+					local pn = p:get_player_name()
+					if player_huds[pn] then
+						local new_huds = {}
+						for idx, hud_id in pairs(player_huds[pn]) do
+							if idx > selected_idx then
+								new_huds[idx - 1] = hud_id
+							elseif idx < selected_idx then
+								new_huds[idx] = hud_id
+							end
+						end
+						player_huds[pn] = new_huds
+					end
+				end
+			end
+			
 			save()
 			minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
 		end
@@ -536,14 +629,13 @@ minetest.register_on_player_receive_fields(function(player, formname, fields)
 	elseif fields.ok or fields.key_enter_field then
 		if fields.new_name ~= nil and string.len(fields.new_name) ~= 0 and selected_idx then
 			waypoints[selected_idx].name = fields.new_name
-			-- update HUD for renamed waypoint
+			-- update HUD for renamed waypoint for all players
 			if show_waypoint_hud then
-				if waypoints[selected_idx].hudId then
-					pcall(function() player:hud_remove(waypoints[selected_idx].hudId) end)
-					waypoints[selected_idx].hudId = nil
+				for _, p in ipairs(minetest.get_connected_players()) do
+					refreshWaypointHud(waypoints, p, selected_idx)
 				end
-				refreshWaypointHud(waypoints, player, selected_idx)
 			end
+			save()
 			minetest.show_formspec(pname, "simple_waypoints:waypoints_formspec", waypoints_formspec.get_main())
 		end
 	end
