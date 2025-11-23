@@ -187,7 +187,7 @@ end
 
 --------------- ON JOIN / LEAVE ------------------
 minetest.register_on_joinplayer(function(player)
-	minetest.after(.5, function()
+	minetest.after(1.5, function()
 		loadWaypointsHud(waypoints, player)
 	end)
 end)
